@@ -409,7 +409,6 @@ def get_ro_list():
         return {"error": str(e)}
 
 
-# ── RO queries — now includes row id ─────────────────────────────────────────
 @app.get("/ro-queries")
 def get_ro_queries(ac_name: str = Query(...)):
     try:
@@ -447,7 +446,6 @@ def get_ro_queries(ac_name: str = Query(...)):
         return {"error": str(e)}
 
 
-# ── Update status by id (primary key) — no more name+mobile matching ─────────
 @app.patch("/ro-queries/update-status")
 def update_query_status(row_id: int = Query(..., alias="id")):
     try:
@@ -459,7 +457,7 @@ def update_query_status(row_id: int = Query(..., alias="id")):
             WHERE id = %s
               AND (current_status IS NULL OR current_status != 'checked');
         """, (row_id,))
-        updated = cur.rowcount          # 1 = success, 0 = already checked / not found
+        updated = cur.rowcount
         conn.commit()
         cur.close()
         conn.close()
@@ -523,7 +521,6 @@ def blo_login(blo_mobile: str = Query(...), epic_no: str = Query(...)):
         return {"success": False, "error": str(e)}
 
 
-# ── BLO queries — now includes row id ────────────────────────────────────────
 @app.get("/blo-queries")
 def get_blo_queries(blo_mobile: str = Query(...)):
     try:
@@ -617,23 +614,13 @@ def get_blo_assistance_summary(blo_mobile: str = Query(...)):
         return {"summary": [dict(r) for r in rows]}
     except Exception as e:
         return {"error": str(e)}
-        
 
-
-# ── Add this endpoint to your main.py ────────────────────────────────────────
-# Table: users   |  mobile column = login number  |  name column = password
 
 @app.post("/super-admin-login")
 def super_admin_login(
     mobile:   str = Query(...),
     password: str = Query(...),
 ):
-    """
-    Authenticate a super admin.
-    DB table : users
-    number   → mobile  column
-    password → name    column
-    """
     try:
         conn = get_connection()
         cur  = conn.cursor()
@@ -659,14 +646,9 @@ def super_admin_login(
     except Exception as e:
         return {"success": False, "error": str(e)}
 
-# ── Replace the /admin-dashboard endpoint in your main.py ────────────────────
 
 @app.get("/admin-dashboard")
 def get_admin_dashboard():
-    """
-    Cumulative totals are derived by SUMMING the per-RO numbers,
-    so they always match the RO/ARO-wise breakdown exactly.
-    """
     try:
         conn = get_connection()
         cur  = conn.cursor()
@@ -680,7 +662,7 @@ def get_admin_dashboard():
         """)
         ro_rows = cur.fetchall()
 
-        # ── 2. Per-taluk base counts ──────────────────────────────────────────
+        # ── 2. Per-taluk base counts (ALL rows, no status filter) ─────────────
         cur.execute("""
             SELECT
                 LOWER(TRIM(taluk))                               AS taluk,
@@ -693,7 +675,7 @@ def get_admin_dashboard():
         """)
         taluk_counts = {r['taluk']: dict(r) for r in cur.fetchall()}
 
-        # ── 3. Per-taluk assistance-type breakdown ───────────────────────────
+        # ── 3. Per-taluk assistance-type breakdown (ALL rows) ─────────────────
         cur.execute("""
             SELECT
                 LOWER(TRIM(taluk))                                          AS taluk,
@@ -714,16 +696,14 @@ def get_admin_dashboard():
         cur.close()
         conn.close()
 
-        # ── 4. Helper: all taluks that belong to an ac_name ──────────────────
+        # ── 4. Helper: all taluk keys that map to this AC ─────────────────────
         def get_taluks_for_ac(ac_name: str):
-            """Returns every taluk key that maps to this AC (lower-cased)."""
             ac_lower = ac_name.lower().strip()
             matched = [
                 taluk.lower().strip()
                 for taluk, mapped in TALUK_GROUP_MAP.items()
                 if mapped.lower() == ac_lower
             ]
-            # Also include the ac_name itself as a direct taluk key
             if ac_lower not in matched:
                 matched.append(ac_lower)
             return matched
@@ -734,23 +714,22 @@ def get_admin_dashboard():
             ac_name = (ro['ac_name'] or '').strip()
             taluks  = get_taluks_for_ac(ac_name)
 
-            ro_total      = 0
-            ro_will_vote  = 0
+            ro_total     = 0
+            ro_will_vote = 0
             ro_cant_vote = 0
-            ro_need_asst  = 0
+            ro_need_asst = 0
             asst_map: dict = {}
 
             for t in taluks:
-                if t in taluk_counts:
-                    tc = taluk_counts[t]
+                tc = taluk_counts.get(t)
+                if tc:
                     ro_total     += int(tc.get('total_queries',  0) or 0)
                     ro_will_vote += int(tc.get('will_vote',       0) or 0)
-                    ro_cant_vote += int(tc.get('cant_vote', 0) or 0)
+                    ro_cant_vote += int(tc.get('cant_vote',       0) or 0)
                     ro_need_asst += int(tc.get('need_assistance', 0) or 0)
-                if t in taluk_assistance:
-                    for item in taluk_assistance[t]:
-                        key = item['assistance_type']
-                        asst_map[key] = asst_map.get(key, 0) + item['count']
+                for item in taluk_assistance.get(t, []):
+                    key = item['assistance_type']
+                    asst_map[key] = asst_map.get(key, 0) + item['count']
 
             ro_breakdown.append({
                 'ro_name':         ro['ro_name']   or 'NA',
@@ -760,7 +739,7 @@ def get_admin_dashboard():
                 'ac_name':         ac_name         or 'NA',
                 'total_queries':   ro_total,
                 'will_vote':       ro_will_vote,
-                'cant_vote':  ro_cant_vote,
+                'cant_vote':       ro_cant_vote,
                 'need_assistance': ro_need_asst,
                 'assistance_breakdown': sorted(
                     [{'assistance_type': k, 'count': v} for k, v in asst_map.items()],
@@ -768,16 +747,14 @@ def get_admin_dashboard():
                 ),
             })
 
-        # Sort by total queries descending
         ro_breakdown.sort(key=lambda x: -x['total_queries'])
 
-        # ── 6. Cumulative = sum of RO rows (guaranteed to match) ──────────────
-        cum_total      = sum(r['total_queries']   for r in ro_breakdown)
-        cum_will_vote  = sum(r['will_vote']        for r in ro_breakdown)
-        cum_cant_vote = sum(r['cant_vote'] for r in ro_breakdown)
-        cum_need_asst  = sum(r['need_assistance']  for r in ro_breakdown)
+        # ── 6. Cumulative = sum of all RO rows ────────────────────────────────
+        cum_total     = sum(r['total_queries']   for r in ro_breakdown)
+        cum_will_vote = sum(r['will_vote']        for r in ro_breakdown)
+        cum_cant_vote = sum(r['cant_vote']        for r in ro_breakdown)
+        cum_need_asst = sum(r['need_assistance']  for r in ro_breakdown)
 
-        # Cumulative assistance: merge all RO assistance_breakdown dicts
         cum_asst_map: dict = {}
         for r in ro_breakdown:
             for item in r['assistance_breakdown']:
@@ -793,7 +770,7 @@ def get_admin_dashboard():
             "totals": {
                 "total_queries":   cum_total,
                 "will_vote":       cum_will_vote,
-                "cant_vote":  cum_cant_vote,
+                "cant_vote":       cum_cant_vote,
                 "need_assistance": cum_need_asst,
             },
             "assistance_totals": assistance_totals,
@@ -803,17 +780,12 @@ def get_admin_dashboard():
     except Exception as e:
         return {"error": str(e)}
 
+
 @app.post("/ro-login")
 def ro_login(
     phone: str = Query(...),
     epic:  str = Query(...),
 ):
-    """
-    Authenticate RO/ARO.
-    Table: ro_datas
-    phone = phone column
-    epic  = epic column
-    """
     try:
         conn = get_connection()
         cur  = conn.cursor()
@@ -848,16 +820,10 @@ def ro_login(
 
 @app.get("/ro-my-queries")
 def get_ro_my_queries(assembly_name: str = Query(...)):
-    """
-    Fetch queries for the logged-in RO by matching
-    ro_datas.assembly_name  →  chatbot_voter_logs.taluk  (case-insensitive)
-    """
     try:
         conn = get_connection()
         cur  = conn.cursor()
 
-        # Direct match: assembly_name from ro_datas vs taluk in chatbot_voter_logs
-        # Also use TALUK_GROUP_MAP to catch aliased taluk names
         matching_taluks = get_matching_taluks(assembly_name)
 
         if not matching_taluks:
@@ -896,9 +862,6 @@ def get_ro_my_queries(assembly_name: str = Query(...)):
 
 @app.get("/ro-my-queries/assistance-summary")
 def get_ro_my_assistance_summary(assembly_name: str = Query(...)):
-    """
-    Assistance summary for the logged-in RO's assembly.
-    """
     try:
         conn = get_connection()
         cur  = conn.cursor()
