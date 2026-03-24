@@ -687,7 +687,7 @@ def get_admin_dashboard():
                 LOWER(TRIM(taluk))                               AS taluk,
                 COUNT(*)                                         AS total_queries,
                 COUNT(*) FILTER (WHERE will_vote  = true)        AS will_vote,
-                COUNT(*) FILTER (WHERE will_vote  = false)       AS cant_vote,
+                COUNT(*) FILTER (WHERE will_vote = false OR will_vote IS NULL) AS cant_vote,
                 COUNT(*) FILTER (WHERE need_assistance = true)   AS need_assistance
             FROM chatbot_voter_logs
             GROUP BY 1;
