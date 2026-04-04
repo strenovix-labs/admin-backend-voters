@@ -530,7 +530,7 @@ def get_blo_queries(blo_mobile: str = Query(...)):
         conn = get_connection()
         cur  = conn.cursor()
 
-        # 🔥 FIX 1: Fetch part_no instead of ac_no
+        # 🔹 Step 1: Get BLO details
         cur.execute("""
             SELECT part_no, assembly
             FROM staging_blo
@@ -542,18 +542,17 @@ def get_blo_queries(blo_mobile: str = Query(...)):
         if not blo_row:
             return {"count": 0, "data": []}
 
-        # 🔥 Clean values properly
         part_no = str(blo_row["part_no"] or "").strip()
         assembly = str(blo_row["assembly"] or "").strip().lower()
 
-        # 🔥 Handle cases like "10.0" → "10"
+        # remove ".0"
         if part_no.endswith(".0"):
             part_no = part_no[:-2]
 
         if not part_no or not assembly:
             return {"count": 0, "data": []}
 
-        # 🔥 FIX 2: Use part_no instead of ac_no
+        # 🔹 Step 2: Fetch by part_no ONLY (fast DB filter)
         cur.execute("""
             SELECT
                 id,
@@ -570,31 +569,39 @@ def get_blo_queries(blo_mobile: str = Query(...)):
                 COALESCE(current_status, 'pending') AS current_status
             FROM chatbot_voter_logs
             WHERE REGEXP_REPLACE(ps_no::text, '\\.0$', '') = %s
-              AND LOWER(TRIM(taluk)) = %s
               AND (current_status IS NULL OR current_status != 'checked')
             ORDER BY applied_date DESC, applied_time DESC;
-        """, (part_no, assembly))
+        """, (part_no,))
 
         rows = cur.fetchall()
         cur.close()
         conn.close()
 
-        data = [
-            {k: (str(v) if v is not None else 'NA') for k, v in row.items()}
-            for row in rows
-        ]
+        # 🔹 Step 3: Apply taluk → AC mapping
+        def map_taluk_to_ac(taluk: str):
+            if not taluk:
+                return ""
+            return TALUK_GROUP_MAP.get(taluk.lower().strip(), taluk)
+
+        filtered = []
+        for r in rows:
+            mapped = map_taluk_to_ac(r["taluk"])
+            if mapped.lower() == assembly:
+                filtered.append({
+                    k: (str(v) if v is not None else 'NA')
+                    for k, v in r.items()
+                })
 
         return {
             "blo_mobile": blo_mobile,
             "part_no": part_no,
             "assembly": assembly,
-            "count": len(data),
-            "data": data
+            "count": len(filtered),
+            "data": filtered
         }
 
     except Exception as e:
         return {"error": str(e)}
-
 
 @app.get("/blo-queries/assistance-summary")
 def get_blo_assistance_summary(blo_mobile: str = Query(...)):
