@@ -530,22 +530,30 @@ def get_blo_queries(blo_mobile: str = Query(...)):
         conn = get_connection()
         cur  = conn.cursor()
 
+        # 🔥 FIX 1: Fetch part_no instead of ac_no
         cur.execute("""
-            SELECT ac_no, assembly
+            SELECT part_no, assembly
             FROM staging_blo
             WHERE blo_mobile = %s
             LIMIT 1;
         """, (blo_mobile,))
         blo_row = cur.fetchone()
+
         if not blo_row:
             return {"count": 0, "data": []}
 
-        ac_no    = str(blo_row["ac_no"]   or "").strip()
+        # 🔥 Clean values properly
+        part_no = str(blo_row["part_no"] or "").strip()
         assembly = str(blo_row["assembly"] or "").strip().lower()
 
-        if not ac_no or not assembly:
+        # 🔥 Handle cases like "10.0" → "10"
+        if part_no.endswith(".0"):
+            part_no = part_no[:-2]
+
+        if not part_no or not assembly:
             return {"count": 0, "data": []}
 
+        # 🔥 FIX 2: Use part_no instead of ac_no
         cur.execute("""
             SELECT
                 id,
@@ -561,19 +569,29 @@ def get_blo_queries(blo_mobile: str = Query(...)):
                 ps_no,
                 COALESCE(current_status, 'pending') AS current_status
             FROM chatbot_voter_logs
-            WHERE ps_no::text = %s
-              AND LOWER(taluk) = %s
+            WHERE REGEXP_REPLACE(ps_no::text, '\\.0$', '') = %s
+              AND LOWER(TRIM(taluk)) = %s
               AND (current_status IS NULL OR current_status != 'checked')
             ORDER BY applied_date DESC, applied_time DESC;
-        """, (ac_no, assembly))
+        """, (part_no, assembly))
 
         rows = cur.fetchall()
         cur.close()
         conn.close()
 
-        data = [{k: (str(v) if v is not None else 'NA')
-                 for k, v in row.items()} for row in rows]
-        return {"count": len(data), "data": data}
+        data = [
+            {k: (str(v) if v is not None else 'NA') for k, v in row.items()}
+            for row in rows
+        ]
+
+        return {
+            "blo_mobile": blo_mobile,
+            "part_no": part_no,
+            "assembly": assembly,
+            "count": len(data),
+            "data": data
+        }
+
     except Exception as e:
         return {"error": str(e)}
 
